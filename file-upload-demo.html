@@ -3,10 +3,6 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/tf-tflite.min.js"></script>
-    <script src="birdnet.js"></script>
     <title>BirdNET demo</title>
     <style>
         html, body {
@@ -135,7 +131,7 @@
 </ul>
 <script>
 (async function main() {
-    const { birds, BirdNetJS } = await initBirdPredictionModel()
+    const { birds, BirdNetWorker } = await initBirdPredictionModel()
     const MIN_AUDIO_CONFIDENCE = 0.1
     const MIN_AREA_CONFIDENCE = 0.0
     let AUDIO_CONFIDENCE = 0.3
@@ -174,9 +170,16 @@
                 extBuf.set(audioBuf, 0)
                 audioBuf = extBuf
             }
-            const audioChunk3000ms = tf.tensor(audioBuf, [batchSize, chunk3s])
-            const prediction = await BirdNetJS.predict(audioChunk3000ms).data()
-            audioChunk3000ms.dispose()
+            BirdNetWorker.postMessage({ message: 'predict', audioBuf, batchSize })
+            const prediction = await new Promise(resolve => {
+                function onMessage({ data }) {
+                    if (data.message === 'predict') {
+                        BirdNetWorker.removeEventListener('message', onMessage)
+                        resolve(data.prediction)
+                    }
+                }
+                BirdNetWorker.addEventListener('message', onMessage)
+            })
             document.getElementById('progress_bar').value = k / pcm48k.length * 100 | 0
             const birdElems = []
             for (let j = 0; j < prediction.length; j++) {
@@ -202,7 +205,8 @@
         document.getElementById('log').innerHTML += `Inference time: ${timeSpent.toFixed(1)}s (x${audioLen / timeSpent | 0})<br />`
     }
 
-    let showSettigns = false
+    document.getElementById('settings').style.display = 'flex'
+    let showSettigns = true
     document.getElementById('settings_btn').onclick = () => {
         document.getElementById('settings').style.display = showSettigns ? 'none' : 'flex'
         showSettigns = !showSettigns
@@ -218,7 +222,7 @@
     }
     document.getElementById('area-confidence').onchange = async (e) => {
         if (birds[0].areaScore === undefined) {
-            await loadBirdsAreaData(birds).catch(e => {
+            await loadBirdsAreaData({ birds, BirdNetWorker }).catch(e => {
                 document.getElementById('error').innerText = e.stack || e.message
                 document.getElementById('areafilter-loader').style.display = 'none'
                 document.getElementById('area-confidence').disabled = false
@@ -256,8 +260,7 @@ async function setBirdLabels(birds, language) {
     }
     return birds
 }
-async function loadBirdsAreaData(birds) {
-    await tf.setBackend('webgl')
+async function loadBirdsAreaData({ birds, BirdNetWorker }) {
     document.getElementById('area-confidence').disabled = true
     document.getElementById('areafilter-loader').style.display = 'inline'
     async function getCoords() {
@@ -271,8 +274,16 @@ async function loadBirdsAreaData(birds) {
     const week = Math.round((new Date() - startOfYear) / 604800000) + 1
     const { latitude, longitude } = await getCoords()
     
-    const areaModel = await tflite.loadTFLiteModel('models/birdnet/area-model.tflite')
-    const areaScores = await areaModel.predict(tf.tensor([[latitude, longitude, week]])).data()
+    BirdNetWorker.postMessage({ message: 'area-scores', latitude, longitude, week })
+    const areaScores = await new Promise(resolve => {
+        function onMessage({ data }) {
+            if (data.message === 'area-scores') {
+                BirdNetWorker.removeEventListener('message', onMessage)
+                resolve(data.areaScores)
+            }
+        }
+        BirdNetWorker.addEventListener('message', onMessage)
+    })
     for (let i = 0; i < areaScores.length; i++) {
         birds[i].areaScore = areaScores[i]
     }
@@ -280,7 +291,6 @@ async function loadBirdsAreaData(birds) {
     document.getElementById('areafilter-loader').style.display = 'none'
 }
 async function initBirdPredictionModel() {
-    await tf.setBackend('webgl')
     document.getElementById('progress').style.display = 'block'
     document.getElementById('progress').max = 100
     document.getElementById('progress').value = 0
@@ -290,24 +300,28 @@ async function initBirdPredictionModel() {
         document.getElementById('progress_bar').value = currentProgress
     }
     let prevLoadProgess = 0
-    const loadModelPromise = tf.loadLayersModel('models/birdnet/model.json', {
-        weightPathPrefix: 'models/birdnet/',
-        onProgress: (p) => { addProgress((p - prevLoadProgess) * 60); prevLoadProgess = p }
-    })
     document.getElementById('progress_text').innerText = 'Loading bird labels...'
     const birds = await setBirdLabels()
     addProgress(20)
     document.getElementById('progress_text').innerText = 'Loading BirdNET model (60 Mb)...'
-    const BirdNetJS = await loadModelPromise
-    document.getElementById('progress_text').innerText = 'BirdNET warmup run...'
-    await new Promise(resolve => setTimeout(resolve, 100))
-    tf.engine().startScope()
-    await BirdNetJS.predict(tf.zeros([1, 144000]), { batchSize: 1 }).data()
-    tf.engine().endScope()
+    const BirdNetWorker = new Worker('birdnet.js')
+    await new Promise(resolve => {
+        function onMessage({ data }) {
+            if (data.message === 'loading') {
+                addProgress((data.progress - prevLoadProgess) * 60)
+            } else if (data.message === 'warmup') {
+                document.getElementById('progress_text').innerText = 'BirdNET warmup run...'
+            } else if (data.message === 'loaded') {
+                BirdNetWorker.removeEventListener('message', onMessage)
+                resolve()
+            }
+        }
+        BirdNetWorker.addEventListener('message', onMessage)
+    })
 
     document.getElementById('progress_text').style.display = 'none'
     document.getElementById('progress').style.display = 'none'
-    return { birds, BirdNetJS }
+    return { birds, BirdNetWorker }
 }
 </script>
 </body>

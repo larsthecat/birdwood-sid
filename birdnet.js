@@ -1,3 +1,41 @@
+importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest')
+importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js')
+importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/tf-tflite.min.js')
+tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/')
+
+async function main() {
+    await tf.ready()
+    const areaModelPromise = tflite.loadTFLiteModel('models/birdnet/area-model.tflite')
+    const BirdNetJS = await tf.loadLayersModel('models/birdnet/model.json', {
+        weightPathPrefix: 'models/birdnet/',
+        onProgress: (progress) => {
+            postMessage({ message: 'loading', progress })
+        }
+    })
+    postMessage({ message: 'warmup' })
+    tf.engine().startScope()
+    await BirdNetJS.predict(tf.zeros([1, 144000]), { batchSize: 1 }).data()
+    tf.engine().endScope()
+    const areaModel = await areaModelPromise
+    postMessage({ message: 'loaded' })
+    onmessage = async function({ data }) {
+        if (data.message === 'predict') {
+            const audioChunkTensor = tf.tensor(data.audioBuf, [data.batchSize, 144000])
+            const prediction = await BirdNetJS.predict(audioChunkTensor).data()
+            audioChunkTensor.dispose()
+            postMessage({ message: 'predict', prediction })
+        }
+        if (data.message === 'area-scores') {
+            const areaTensor = tf.tensor([[data.latitude, data.longitude, data.week]])
+            const areaScores = await areaModel.predict(areaTensor).data()
+            areaTensor.dispose()
+            postMessage({ message: 'area-scores', areaScores })
+        }
+    }
+}
+
+main()
+
 class MelSpecLayerSimple extends tf.layers.Layer {
     constructor(config) {
         super(config)
@@ -28,7 +66,7 @@ class MelSpecLayerSimple extends tf.layers.Layer {
                 spec = tf.div(spec, tf.max(spec, -1, true).add(0.000001))
                 spec = tf.sub(spec, 0.5)
                 spec = tf.mul(spec, 2.0)
-                if (window.useFastFFT === false) {
+                if (globalThis.useFastFFT === false) {
                     spec = tf.signal.stft(spec, this.frameLength, this.frameStep, this.frameLength, tf.signal.hannWindow)
                     spec = tf.cast(spec, 'float32')
                 } else {
