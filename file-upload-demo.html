@@ -162,15 +162,15 @@
         document.getElementById('log').innerHTML = `${audioLen | 0}s audio, decoded in ${((performance.now() - start) / 1000).toFixed(1)}s. Inference...<br />`
         start = performance.now()
         const chunk3s = 48000 * 3
-        const batchSize = 8
-        for (let k = 0; k < pcm48k.length; k += chunk3s * batchSize) {
-            let audioBuf = pcm48k.slice(k, k + chunk3s * batchSize)
-            if (audioBuf.length < chunk3s * batchSize) {
-                let extBuf = new Float32Array(chunk3s * batchSize)
+        const offset = 0; // 48000 * 1
+        for (let k = 0; k < pcm48k.length; k += chunk3s - offset) {
+            let audioBuf = pcm48k.slice(k, k + chunk3s)
+            if (audioBuf.length < chunk3s) {
+                let extBuf = new Float32Array(chunk3s)
                 extBuf.set(audioBuf, 0)
                 audioBuf = extBuf
             }
-            BirdNetWorker.postMessage({ message: 'predict', audioBuf, batchSize })
+            BirdNetWorker.postMessage({ message: 'predict', audioBuf, batchSize: 1 })
             const prediction = await new Promise(resolve => {
                 function onMessage({ data }) {
                     if (data.message === 'predict') {
@@ -186,9 +186,8 @@
                 const audioConfidence = prediction[j]
                 const areaConfidence = (birds[j % 6522].areaScore || 1)
                 if (audioConfidence > MIN_AUDIO_CONFIDENCE && areaConfidence > MIN_AREA_CONFIDENCE) {
-                    const curChunk = j / 6522 | 0
-                    const seconds = (k + curChunk * chunk3s) / 48000 % 60
-                    const minutes = (k + curChunk * chunk3s) / 48000 / 60 | 0
+                    const seconds = k / 48000 % 60
+                    const minutes = k / 48000 / 60 | 0
                     const time = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
                     const birdElem = document.createElement('li')
                     const visible = prediction[j] > AUDIO_CONFIDENCE && areaConfidence > AREA_THRESHOLD
