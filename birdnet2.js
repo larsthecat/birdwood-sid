@@ -86,7 +86,6 @@ async function predictModel() {
         },
         predict
     }
-
 }
 
 tf.registerKernel({

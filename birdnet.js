@@ -1,47 +1,77 @@
 importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest')
-importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js')
-importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/tf-tflite.min.js')
-tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/')
 
 main()
-
 async function main() {
-    const backend = 'webgpu' //new URL(location.href).searchParams.get('backend')
-    console.log('WORKER | backend:', backend)
-    if (backend) {
-        await tf.setBackend(backend)
-    } else {
-        await tf.ready()
-    }
-
-    const areaModelPromise = tflite.loadTFLiteModel('models/birdnet/area-model.tflite')
-    const BirdNetJS = await tf.loadLayersModel('models/birdnet/model.json', {
-        weightPathPrefix: 'models/birdnet/',
-        onProgress: (progress) => {
-            postMessage({ message: 'loading', progress })
+    const navigatorLang = new URL(location.href).searchParams.get('lang')
+    await tf.setBackend('webgl')
+    const BirdNetJS = await predictModel()
+    postMessage({ message: 'warmup', progress: 70 })
+    await BirdNetJS.warmup()
+    postMessage({ message: 'load_geomodel', progress: 90 })
+    const areaModel = await tf.loadGraphModel('/birdnet-web/models/birdnet/area-model/model.json')
+    postMessage({ message: 'load_labels', progress: 95 })
+    const supportedLanguages = ['af', 'da', 'en_us', 'fr', 'ja', 'no', 'ro', 'sl', 'tr', 'ar', 'de', 'es',
+        'hu', 'ko', 'pl', 'ru', 'sv', 'uk', 'cs', 'en_uk', 'fi', 'it', 'nl', 'pt', 'sk', 'th', 'zh']
+    const lang = supportedLanguages.find(l => l.startsWith(navigatorLang.split('-')[0])) || 'en_us'
+    const birdsList     = (await fetch('/birdnet-web/models/birdnet/labels/en_us.txt').then(r => r.text())).split('\n')
+    const birdsListI18n = (await fetch(`/birdnet-web/models/birdnet/labels/${lang}.txt`).then(r => r.text())).split('\n')
+    const birds = new Array(birdsList.length)
+    for (let i = 0; i < birdsList.length; i++) {
+        birds[i] = {
+            geoscore: 1,
+            name: birdsList[i].split('_')[1],
+            nameI18n: birdsListI18n[i].split('_')[1],
         }
-    })
-    postMessage({ message: 'warmup' })
-    tf.engine().startScope()
-    await BirdNetJS.predict(tf.zeros([1, 144000]), { batchSize: 1 }).data()
-    tf.engine().endScope()
-    const areaModel = await areaModelPromise
+    }
     postMessage({ message: 'loaded' })
+    const MIN_AUDIO_CONFIDENCE = 0.1
+    const MIN_AREA_CONFIDENCE = 0.1
     onmessage = async function({ data }) {
         if (data.message === 'predict') {
-            tf.engine().startScope()
-            const audioChunkTensor = tf.tensor(data.audioBuf, [data.batchSize, 144000])
-            const prediction = await BirdNetJS.predict(audioChunkTensor).data()
-            tf.engine().endScope()
+            const predictionList = await BirdNetJS.predict(tf.tensor(data.pcmAudio, [data.pcmAudio.length / 144000, 144000]))
+            const prediction = []
+            for (let batch = 0; batch < predictionList.length; batch++) {
+                for (let i = 0; i < predictionList[batch].length; i++) {
+                    const confidence = predictionList[batch][i]
+                    if (confidence > MIN_AUDIO_CONFIDENCE && birds[i].geoscore > MIN_AREA_CONFIDENCE) {
+                        prediction.push({ ...birds[i], batch, confidence })
+                    }
+                }
+            }
             postMessage({ message: 'predict', prediction })
         }
         if (data.message === 'area-scores') {
             tf.engine().startScope()
-            const areaTensor = tf.tensor([[data.latitude, data.longitude, data.week]])
+            const startOfYear = new Date(new Date().getFullYear(), 0, 1);
+            startOfYear.setDate(startOfYear.getDate() + (1 - (startOfYear.getDay() % 7)))
+            const week = Math.round((new Date() - startOfYear) / 604800000) + 1
+            const areaTensor = tf.tensor([[data.latitude, data.longitude, week]])
             const areaScores = await areaModel.predict(areaTensor).data()
             tf.engine().endScope()
-            postMessage({ message: 'area-scores', areaScores })
+            for (let i = 0; i < birds.length; i++) {
+                birds[i].geoscore = areaScores[i]
+            }
+            postMessage({ message: 'area-scores' })
         }
+    }
+}
+
+async function predictModel() {
+    const BirdNetJS = await tf.loadLayersModel('models/birdnet/model.json', {
+        onProgress: (progress) => postMessage({ message: 'load_model', progress: progress * 70 | 0 })
+    })
+    async function predict(signal) {
+        const resTensor = BirdNetJS.predict(signal)
+        signal.dispose()
+        const result = await resTensor.array()
+        resTensor.dispose()
+        return result
+    }
+    return {
+        async warmup() {
+            await predict(tf.zeros([1, 144000]))
+        },
+        predict
     }
 }
 

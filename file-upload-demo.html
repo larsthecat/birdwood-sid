@@ -131,12 +131,11 @@
 </ul>
 <script>
 (async function main() {
-    const { birds, BirdNetWorker } = await initBirdPredictionModel()
-    const MIN_AUDIO_CONFIDENCE = 0.1
-    const MIN_AREA_CONFIDENCE = 0.0
+    const version = Number(new URL(location.href).searchParams.get('ver')) || 1
+    document.title = `BirdNET v${version}`
+    const { BirdNetJS, SAMPLE_RATE, CHUNK_3S } = await loadingScreen({ version })
     let AUDIO_CONFIDENCE = 0.3
     let AREA_THRESHOLD = 0.1
-    const SAMPLE_RATE = 48000
 
     document.getElementById('audio_file').style.display = 'block'
     document.getElementById('audio_file').onchange = (event) => processAudio(event).catch(e => {
@@ -157,45 +156,33 @@
         const arrayBuffer = await file.arrayBuffer()
         const tempCtx = new AudioContext({ sampleRate: SAMPLE_RATE })
         const originalBuffer = await tempCtx.decodeAudioData(arrayBuffer)
-        const pcm48k = new Float32Array(originalBuffer.getChannelData(0))
+        const pcmAudio = new Float32Array(originalBuffer.getChannelData(0))
         tempCtx.close()
-        const audioLen = pcm48k.length / SAMPLE_RATE
+        const audioLen = pcmAudio.length / SAMPLE_RATE
         document.getElementById('log').innerHTML = `${audioLen | 0}s audio, decoded in ${((performance.now() - start) / 1000).toFixed(1)}s. Inference...<br />`
         start = performance.now()
-        const chunk3s = SAMPLE_RATE * 3
-        const offset = 0; // SAMPLE_RATE * 1
-        for (let k = 0; k < pcm48k.length; k += chunk3s - offset) {
-            let audioBuf = pcm48k.slice(k, k + chunk3s)
-            if (audioBuf.length < chunk3s) {
-                let extBuf = new Float32Array(chunk3s)
-                extBuf.set(audioBuf, 0)
-                audioBuf = extBuf
+        for (let k = 0; k < pcmAudio.length; k += CHUNK_3S) {
+            let pcm3sChunk = pcmAudio.slice(k, k + CHUNK_3S)
+            if (pcm3sChunk.length < CHUNK_3S) {
+                let extBuf = new Float32Array(CHUNK_3S)
+                extBuf.set(pcm3sChunk, 0)
+                pcm3sChunk = extBuf
             }
-            BirdNetWorker.postMessage({ message: 'predict', audioBuf, batchSize: 1 })
-            const prediction = await new Promise(resolve => {
-                function onMessage({ data }) {
-                    if (data.message === 'predict') {
-                        BirdNetWorker.removeEventListener('message', onMessage)
-                        resolve(data.prediction)
-                    }
-                }
-                BirdNetWorker.addEventListener('message', onMessage)
-            })
-            document.getElementById('progress_bar').value = k / pcm48k.length * 100 | 0
+            const { prediction } = await BirdNetJS({ message: 'predict', pcmAudio: pcm3sChunk })
+            document.getElementById('progress_bar').value = k / pcmAudio.length * 100 | 0
             const birdElems = []
             for (let j = 0; j < prediction.length; j++) {
-                const audioConfidence = prediction[j]
-                const areaConfidence = (birds[j % 6522].areaScore || 1)
-                if (audioConfidence > MIN_AUDIO_CONFIDENCE && areaConfidence > MIN_AREA_CONFIDENCE) {
-                    const seconds = k / SAMPLE_RATE % 60
-                    const minutes = k / SAMPLE_RATE / 60 | 0
-                    const time = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-                    const birdElem = document.createElement('li')
-                    const visible = prediction[j] > AUDIO_CONFIDENCE && areaConfidence > AREA_THRESHOLD
-                    birdElem.style.display = visible ? '' : 'none'
-                    birdElem.innerHTML = `${time} - <span data-id="${j % 6522}" data-confidence="${prediction[j]}">${birds[j % 6522].name}</span> (${prediction[j].toFixed(2)})`
-                    birdElems.push(birdElem)
-                }
+                const audioConfidence = prediction[j].confidence
+                const areaConfidence = prediction[j].geoscore
+                
+                const seconds = (k / SAMPLE_RATE | 0) % 60
+                const minutes = k / SAMPLE_RATE / 60 | 0
+                const time = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+                const birdElem = document.createElement('li')
+                const visible = areaConfidence > AUDIO_CONFIDENCE && areaConfidence > AREA_THRESHOLD
+                birdElem.style.display = visible ? '' : 'none'
+                birdElem.innerHTML = `${time} - <span data-geoscore="${areaConfidence}" data-confidence="${audioConfidence}">${prediction[j].nameI18n}</span> (${audioConfidence.toFixed(2)})`
+                birdElems.push(birdElem)
             }
             document.getElementById('birdslist').append(...birdElems)
         }
@@ -211,117 +198,87 @@
         document.getElementById('settings').style.display = showSettigns ? 'none' : 'flex'
         showSettigns = !showSettigns
     }
-    document.getElementById('select_lang').onchange = async (e) => {
-        await setBirdLabels(birds, e.target.value)
-        updateBirds()
-    }
     document.getElementById('audio-confidence').onchange = async (e) => {
         AUDIO_CONFIDENCE = e.target.value / 10
         document.getElementById('audio-confidence-num').innerText = AUDIO_CONFIDENCE.toFixed(2)
         updateBirds()
     }
     document.getElementById('area-confidence').onchange = async (e) => {
-        if (birds[0].areaScore === undefined) {
-            await loadBirdsAreaData({ birds, BirdNetWorker }).catch(e => {
-                document.getElementById('error').innerText = e.stack || e.message
-                document.getElementById('areafilter-loader').style.display = 'none'
-                document.getElementById('area-confidence').disabled = false
-            })
-        }
         AREA_THRESHOLD = e.target.value / 10
         document.getElementById('area-confidence-num').innerText = AREA_THRESHOLD.toFixed(2)
         updateBirds()
     }
     function updateBirds() {
         document.querySelectorAll('#birdslist span').forEach(bird => {
-            const index = Number(bird.attributes['data-id'].value)
             const confidence = Number(bird.attributes['data-confidence'].value)
-            const areaScore = birds[index].areaScore || 1
-            bird.innerText = birds[index].name
+            const areaScore = Number(bird.attributes['data-geoscore'].value)
             bird.parentNode.style.display = areaScore > AREA_THRESHOLD && confidence > AUDIO_CONFIDENCE ? '' : 'none'
         })
     }
 })().catch(e => document.getElementById('error').innerText = e.stack || e.message)
 
-async function setBirdLabels(birds, language) {
-    if (!language) {
-        const supportedLanguages = ['af', 'da', 'en_us', 'fr', 'ja', 'no', 'ro', 'sl', 'tr', 'ar', 'de', 'es',
-        'hu', 'ko', 'pl', 'ru', 'sv', 'uk', 'cs', 'en_uk', 'fi', 'it', 'nl', 'pt', 'sk', 'th', 'zh']
-        language = supportedLanguages.find(l => l.startsWith(navigator.language)) || 'en_us'
-        document.getElementById('select_lang').value = language
+async function loadingScreen({ version=1 }={}) {
+    document.getElementById('progress').style.display = 'block'
+  
+        
+    let SAMPLE_RATE = 48000
+    let CHUNK_3S = 144000
+    let path = `/birdnet-web/birdnet.js?lang=${navigator.language}`
+
+    if (version === 2) {
+        SAMPLE_RATE = 22050
+        CHUNK_3S = 512 + 128 * 511
+        path = `/birdnet-web/birdnet2.js?lang=${navigator.language}`
     }
-    const birdLabels = (await fetch(`models/birdnet/labels/${language}.txt`).then(r => r.text()))
-        .split('\n').filter(x => x)
-    if (!birds) {
-        birds = new Array(birdLabels.length).fill(null).map(b => ({}))
-    }
-    for (let i = 0; i < birdLabels.length; i++) {
-        birds[i].name = birdLabels[i].split('_')[1]
-    }
-    return birds
-}
-async function loadBirdsAreaData({ birds, BirdNetWorker }) {
-    document.getElementById('area-confidence').disabled = true
-    document.getElementById('areafilter-loader').style.display = 'inline'
-    async function getCoords() {
-        return new Promise((resolve, reject) => {
-            navigator.geolocation.getCurrentPosition(({ coords }) => resolve(coords), reject, { enableHighAccuracy: false })
+
+    const BirdNetWorker = new Worker(path)
+    async function BirdNetJS(data) {
+        BirdNetWorker.postMessage(data)
+        return new Promise(resolve => {
+            function onMessage({ data: dataRes }) {
+                if (dataRes.message === data.message) {
+                    BirdNetWorker.removeEventListener('message', onMessage)
+                    resolve(dataRes)
+                }
+            }
+            BirdNetWorker.addEventListener('message', onMessage)
         })
     }
-    const startOfYear = new Date(new Date().getFullYear(), 0, 1);
-    startOfYear.setDate(startOfYear.getDate() + (1 - (startOfYear.getDay() % 7)))
 
-    const week = Math.round((new Date() - startOfYear) / 604800000) + 1
-    const { latitude, longitude } = await getCoords()
-    
-    BirdNetWorker.postMessage({ message: 'area-scores', latitude, longitude, week })
-    const areaScores = await new Promise(resolve => {
-        function onMessage({ data }) {
-            if (data.message === 'area-scores') {
-                BirdNetWorker.removeEventListener('message', onMessage)
-                resolve(data.areaScores)
-            }
-        }
-        BirdNetWorker.addEventListener('message', onMessage)
+    const geolocation = new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: false })
     })
-    for (let i = 0; i < areaScores.length; i++) {
-        birds[i].areaScore = areaScores[i]
-    }
-    document.getElementById('area-confidence').disabled = false
-    document.getElementById('areafilter-loader').style.display = 'none'
-}
-async function initBirdPredictionModel() {
-    document.getElementById('progress').style.display = 'block'
-    document.getElementById('progress').max = 100
-    document.getElementById('progress').value = 0
-    let currentProgress = 0
-    function addProgress(value) {
-        currentProgress += value
-        document.getElementById('progress_bar').value = currentProgress
-    }
-    let prevLoadProgess = 0
-    document.getElementById('progress_text').innerText = 'Loading bird labels...'
-    const birds = await setBirdLabels()
-    addProgress(20)
-    document.getElementById('progress_text').innerText = 'Loading BirdNET model (60 Mb)...'
-    const BirdNetWorker = new Worker('birdnet.js?fast_fft=on')
-    await new Promise(resolve => {
-        function onMessage({ data }) {
-            if (data.message === 'loading') {
-                addProgress((data.progress - prevLoadProgess) * 60)
-            } else if (data.message === 'warmup') {
+    await new Promise((resolve) => {
+        function onLoadingMessage({ data }) {
+            if (data.progress) {
+                document.querySelector('#progress_bar').value = data.progress
+            }
+            if (data.message === 'load_model') {
+                document.getElementById('progress_text').innerText = 'Loading BirdNET model...'
+            }
+            if (data.message === 'warmup') {
                 document.getElementById('progress_text').innerText = 'BirdNET warmup run...'
-            } else if (data.message === 'loaded') {
-                BirdNetWorker.removeEventListener('message', onMessage)
+            }
+            if (data.message === 'load_labels') {
+                document.getElementById('progress_text').innerText = 'Loading bird labels...'
+            }
+            if (data.message === 'load_geomodel') {
+                document.getElementById('progress_text').innerText = 'Loading geolocation model...'
+            }
+            if (data.message === 'loaded') {
+                BirdNetWorker.removeEventListener('message', onLoadingMessage)
                 resolve()
             }
         }
-        BirdNetWorker.addEventListener('message', onMessage)
+        BirdNetWorker.addEventListener('message', onLoadingMessage)
     })
 
-    document.getElementById('progress_text').style.display = 'none'
+    document.getElementById('progress_text').innerText = 'Waiting geolocation...'
+    const { coords: { latitude, longitude } } = await geolocation
+    document.getElementById('progress_text').innerText = 'Inference area model...'
+    await BirdNetJS({ message: 'area-scores', latitude, longitude })
     document.getElementById('progress').style.display = 'none'
-    return { birds, BirdNetWorker }
+    return { BirdNetJS, SAMPLE_RATE, CHUNK_3S }
 }
 </script>
 </body>
