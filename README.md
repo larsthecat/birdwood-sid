@@ -1,7 +1,5 @@
-# BirdNET running in browser
+# BirdWood in browser ID
 
-[Inference benchmark (webgl)](https://georg95.github.io/birdnet-web/test-chirpity.html?backend=webgl&fast_fft=on)
+[Try It Now](https://georg95.github.io/birdnet-web/file-upload-demo.html)
 
-[Inference benchmark (webgpu)](https://georg95.github.io/birdnet-web/test-chirpity.html?backend=webgl&fast_fft=on)
-
-[wav,ogg,mp3 file inference demo](https://georg95.github.io/birdnet-web/file-upload-demo.html)
+## Thankyou to BirdNET for providing the API used!
